@@ -48,6 +48,7 @@
 #include "php_ini.h"
 #include "ext/standard/info.h"
 #include "php_cosa.h"
+#include "safe_str_lib.h"
 
 #ifdef COMCAST_SSO
 #include "sso_api.h"
@@ -61,6 +62,8 @@
 #define _RETURN_STRING(str) RETURN_STRING(str)
 #endif
 
+#define MAX_SUBSYSTEMPREFIX 6
+
 #define  COSA_PHP_EXT_LOG_FILE_NAME "/var/log/cosa_php_ext.log"
 #define  COSA_PHP_EXT_DEBUG_FILE    "/tmp/cosa_php_debug"
 #define  COSA_PHP_EXT_PCSIM         "/tmp/cosa_php_pcsim"
@@ -72,23 +75,38 @@
                  mode_t             origMod     = umask(0);                 \
                  struct timeval     tv;                                     \
                  struct tm          tm;                                     \
+                 errno_t            rc          = -1;                       \
+                 int                ind         = -1;                       \
                                                                             \
-                 pFile = fopen(COSA_PHP_EXT_LOG_FILE_NAME, "a");            \
+                 rc  = fopen_s(&pFile, COSA_PHP_EXT_LOG_FILE_NAME, "a");    \
+                 if(rc != EOK)                                              \
+                 {                                                          \
+                     CosaPhpExtLog("ccsp-webui: Safe File Open Error - %s %d rc = %d", __FUNCTION__, __LINE__, rc);\
+                 }                                                          \
                                                                             \
                  if ( pFile )                                               \
                  {   /* print the current timestamp */                      \
                      gettimeofday(&tv, NULL);                               \
                      tm = *localtime(&tv.tv_sec);                           \
-                     fprintf                                                \
+                     rc = fprintf_s                                         \
                         (                                                   \
                             pFile,                                          \
                             "%04d-%02d-%02d %02d-%02d-%02d:%06d ",          \
                             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,   \
                             tm.tm_hour, tm.tm_min, tm.tm_sec,               \
-                            tv.tv_usec                                      \
+                            tv.tv_usec, &ind                                \
                         );                                                  \
                                                                             \
-                     fprintf(pFile, msg);                                   \
+                     if(rc != EOK)                                          \
+                     {                                                      \
+                         CosaPhpExtLog("ccsp-webui: Safe fprintf_s Error - %s %d rc = %d", __FUNCTION__, __LINE__, rc);\
+                     }                                                      \
+                                                                            \
+                     rc = fprintf_s(pFile, "%s", msg, &ind);                \
+                     if(rc != EOK)                                          \
+                     {                                                      \
+                        CosaPhpExtLog("ccsp-webui: Safe fprintf_s Error - %s %d rc = %d", __FUNCTION__, __LINE__, rc);\
+                     }                                                      \
                      fclose(pFile);                                         \
                  }                                                          \
                                                                             \
@@ -150,6 +168,8 @@ path_message_func
     char *from = 0;
     char *req = 0;
     char * err_msg  = DBUS_ERROR_NOT_SUPPORTED;
+    errno_t rc1 = -1, rc2 = -1;
+    int ind1 = -1, ind2 = -1;
 
     reply = dbus_message_new_method_return (message);
     if (reply == NULL)
@@ -157,33 +177,42 @@ path_message_func
         return DBUS_HANDLER_RESULT_HANDLED;
     }
 
-    if(!strcmp("org.freedesktop.DBus.Introspectable", interface)  && !strcmp(method, "Introspect"))
-    {
-        if ( !dbus_message_append_args (reply, DBUS_TYPE_STRING, &Introspect_msg, DBUS_TYPE_INVALID))
+     if(!(rc1 = strcmp_s("org.freedesktop.DBus.Introspectable", sizeof("org.freedesktop.DBus.Introspectable"), interface, &ind1)) &&
+        !(rc2 = strcmp_s("Introspect", sizeof("Introspect"), method, &ind2)) &&
+        (!ind1 && !ind2))
+      {
+            if ( !dbus_message_append_args (reply, DBUS_TYPE_STRING, &Introspect_msg, DBUS_TYPE_INVALID))
 
-        if (!dbus_connection_send (conn, reply, NULL))
+            if (!dbus_connection_send (conn, reply, NULL))
 
-        dbus_message_unref (reply);
-        return DBUS_HANDLER_RESULT_HANDLED;
-    }
+            dbus_message_unref (reply);
+            return DBUS_HANDLER_RESULT_HANDLED;
+	}
+	else
+        {
+            CosaPhpExtLog("COSA: Safe String Comparison error rc1 = %d, rc2 = %d ind1 = %d ind2 = %d", rc1, rc2,ind1,ind2);
+        }
 
-
-    if (!strcmp(msg_interface, interface) && !strcmp(method, msg_method))
-    {
-
-        if(dbus_message_get_args (message,
+    if(!(rc1 = strcmp_s(msg_interface, strlen(msg_interface), interface, &ind1)) && !(rc2 = strcmp_s(method, strlen(method), msg_method, &ind2)) &&
+       (!ind1 && !ind2))
+       {
+            if(dbus_message_get_args (message,
                                 NULL,
                                 DBUS_TYPE_STRING, &from,
                                 DBUS_TYPE_STRING, &req,
                                 DBUS_TYPE_INVALID))
-        {
-            dbus_message_append_args (reply, DBUS_TYPE_STRING, &resp, DBUS_TYPE_INVALID);
-            if (!dbus_connection_send (conn, reply, NULL))
-                dbus_message_unref (reply);
-        }
+            {
+                dbus_message_append_args (reply, DBUS_TYPE_STRING, &resp, DBUS_TYPE_INVALID);
+                if (!dbus_connection_send (conn, reply, NULL))
+                    dbus_message_unref (reply);
+            }
 
-        return DBUS_HANDLER_RESULT_HANDLED;
-    }
+            return DBUS_HANDLER_RESULT_HANDLED;
+        }
+        else
+        {
+            CosaPhpExtLog("COSA: Safe String Comparison error rc1 = %d, rc2 = %d ind1 = %d ind2 = %d", rc1, rc2, ind1, ind2);
+        }
     dbus_message_set_error_name (reply, err_msg) ;
     dbus_connection_send (conn, reply, NULL);
     dbus_message_unref (reply);
@@ -252,14 +281,24 @@ int UiDbusClientGetDestComponent(char* pObjName,char** ppDestComponentName, char
 
 void CheckAndSetSubsystemPrefix (char** ppDotStr, char* pSubSystemPrefix)
 {
-    if (!strncmp(*ppDotStr,"eRT",3))   //check whether str has prex of eRT
+    errno_t rc = -1;
+
+    if (!strncmp(*ppDotStr, "eRT.", 4))   //check whether str has prex of eRT
     {
-        strncpy(pSubSystemPrefix,"eRT.",4);
+	rc = strncpy_s(pSubSystemPrefix,  MAX_SUBSYSTEMPREFIX, "eRT.", 4);
+        if(rc != EOK)
+        {
+            CosaPhpExtLog("COSA: Safe String Comparison error %d", rc);
+        }
         *ppDotStr +=4;              //shift four bytes to get rid of eRT:
     }
-    else if (!strncmp(*ppDotStr,"eMG",3))  //check wither str has prex of eMG
+    else if (!strncmp(*ppDotStr, "eMG.", 4))  //check wither str has prex of eMG
     {
-        strncpy(pSubSystemPrefix,"eMG.",4);
+        rc = strncpy_s(pSubSystemPrefix, MAX_SUBSYSTEMPREFIX, "eMG.", 4);
+	if(rc != EOK)
+        {
+            CosaPhpExtLog("COSA: Safe String Comparison error %d", rc);
+        }
         *ppDotStr +=4;  //shit four bytes to get rid of eMG;
     }
 }
@@ -309,9 +348,14 @@ ZEND_GET_MODULE(cosa)
 static void php_cosa_init_globals(zend_cosa_globals *cosa_globals)
 {
     FILE *fp = NULL;
-    
+    errno_t rc = -1;
+ 
     /* If file exists, we'll open the debug flag */
-    fp = fopen(COSA_PHP_EXT_DEBUG_FILE, "r");
+    rc = fopen_s(&fp, COSA_PHP_EXT_DEBUG_FILE, "r");
+    if(rc != EOK)
+    {
+        CosaPhpExtLog("ccsp-webui: Safe File Open Error - %s %d rc = %d", __FUNCTION__, __LINE__, rc);
+    }    
     if (fp)
     {
         debugFlag = 1;
@@ -319,7 +363,11 @@ static void php_cosa_init_globals(zend_cosa_globals *cosa_globals)
     }
 
     /* Check if this is a PC simulation */
-    fp = fopen(COSA_PHP_EXT_PCSIM, "r");
+    rc = fopen_s(&fp, COSA_PHP_EXT_PCSIM, "r");
+    if(rc != EOK)
+    {
+        CosaPhpExtLog("ccsp-webui: Safe File Open Error - %s %d rc = %d", __FUNCTION__, __LINE__, rc);
+    }
     if (fp)
     {
         gPcSim = 1;
@@ -331,6 +379,7 @@ static void php_cosa_init_globals(zend_cosa_globals *cosa_globals)
  */
 PHP_MINIT_FUNCTION(cosa)
 {
+    errno_t rc;
     ZEND_INIT_MODULE_GLOBALS(cosa, php_cosa_init_globals, NULL);
     
     bus_handle = NULL;
@@ -340,11 +389,21 @@ PHP_MINIT_FUNCTION(cosa)
      */
     if ( gPcSim )
     {
-        sprintf(dst_pathname_cr, CCSP_DBUS_INTERFACE_CR);
+        rc = sprintf_s(dst_pathname_cr, sizeof(dst_pathname_cr), "%s",  CCSP_DBUS_INTERFACE_CR);
+        if((rc < EOK) || (rc == ESNULLP) || (rc == ESZEROL) || (rc == ESLEMAX) || (rc == EOVERFLOW) || (rc == ESNOSPC))
+        {
+            CosaPhpExtLog("ccsp-webui: Safe sprintf_s Error - %s %d rc = %d", __FUNCTION__, __LINE__, rc);
+            return FAILURE;
+        }
     }
     else
     {
-        sprintf(dst_pathname_cr, "eRT." CCSP_DBUS_INTERFACE_CR);
+        rc = sprintf_s(dst_pathname_cr,sizeof(dst_pathname_cr), "%s", "eRT." CCSP_DBUS_INTERFACE_CR);
+        if((rc < EOK) || (rc == ESNULLP) || (rc == ESZEROL) || (rc == ESLEMAX) || (rc == EOVERFLOW) || (rc == ESNOSPC))
+        {
+            CosaPhpExtLog("ccsp-webui: Safe sprintf_s Error - %s %d rc = %d", __FUNCTION__, __LINE__, rc);
+            return FAILURE;
+        }
     }
 
     CosaPhpExtLog("COSA PHP extension starts -- PC sim = %d...\n", gPcSim);
@@ -403,12 +462,17 @@ PHP_RSHUTDOWN_FUNCTION(cosa)
 PHP_MINFO_FUNCTION(cosa)
 {
     int                     iIndex              = 0;
-    char                    TmpBuffer[64]       = {0};
+    char                    TmpBuffer[64];
+    errno_t                 rc;
 
     CosaPhpExtLog("COSA PHP MINFO...\n");
 
-    sprintf(TmpBuffer, "0x%X", bus_handle);
-
+    rc = sprintf_s(TmpBuffer, sizeof(TmpBuffer), "0x%X", bus_handle);
+    if((rc < EOK) || (rc == ESNULLP) || (rc == ESZEROL) || (rc == ESLEMAX) || (rc == EOVERFLOW) || (rc == ESNOSPC))
+    {
+        CosaPhpExtLog("ccsp-webui: Safe sprintf_s Error - %s %d rc = %d", __FUNCTION__, __LINE__, rc);
+        return FAILURE;
+    } 
     php_info_print_table_start();
     php_info_print_table_row(2, "cosa support",     "enabled");
     php_info_print_table_row(2, "PC sim",           gPcSim ? "Yes" : "No");
@@ -421,7 +485,12 @@ PHP_MINFO_FUNCTION(cosa)
     {
         if ( cosa_functions[iIndex].fname )
         {
-            sprintf(TmpBuffer, "Ext Function %d:", iIndex);
+            rc = sprintf_s(TmpBuffer,sizeof(TmpBuffer), "Ext Function %d:", iIndex);
+            if((rc < EOK) || (rc == ESNULLP) || (rc == ESZEROL) || (rc == ESLEMAX) || (rc == EOVERFLOW) || (rc == ESNOSPC))
+            {
+                CosaPhpExtLog("ccsp-webui: Safe sprintf Error - %s %d rc = %d", __FUNCTION__, __LINE__, rc);
+                return FAILURE;
+            }
             php_info_print_table_row(2, TmpBuffer, cosa_functions[iIndex].fname);
         }
     }
@@ -549,10 +618,11 @@ PHP_FUNCTION(getStr)
     char*                   ppDestPath          = NULL;
     int                     size                = 0;
     parameterValStruct_t ** parameterVal        = NULL;
-    char                    retParamVal[1024]   = {0};
+    char                    retParamVal[512]    = {0};
     int                     iReturn             = 0;
     int                     loop                = 0;
-    char                    subSystemPrefix[6]  = {0};
+    char                    subSystemPrefix[MAX_SUBSYSTEMPREFIX]  = {0};
+    errno_t                 rc                  = -1;
 
     //Parse Input parameters first
     if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &dotstr, &flen) == FAILURE)
@@ -608,7 +678,12 @@ PHP_FUNCTION(getStr)
 
     if ( size >= 1 )
     {
-        strncpy(retParamVal,parameterVal[0]->parameterValue, sizeof(retParamVal));
+        rc = strncpy_s(retParamVal, sizeof(retParamVal), parameterVal[0]->parameterValue, sizeof(retParamVal));
+        if(rc != EOK)
+        {
+            CosaPhpExtLog("ccsp-webui: Safe String copy(strncpy_s) - %s %d rc = %d", __FUNCTION__, __LINE__, rc);
+            _RETURN_STRING("");
+        }
         free_parameterValStruct_t(bus_handle, size, parameterVal);
     }
 
@@ -644,8 +719,10 @@ PHP_FUNCTION(setStr)
     char                          *paramNames[1];
     int                           iReturn;
     char*                         pFaultParameterNames  = NULL;
-    char                          subSystemPrefix[6]    = {0};
+    char                          subSystemPrefix[MAX_SUBSYSTEMPREFIX]    = {0};
     dbus_bool                     bDbusCommit           = 1;
+    errno_t                       rc                    = -1;
+    int                           ind                   = -1;
 
     //Parse Parameters first
     if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "ssb", &dotstr, &flen, &val, &vlen, &bCommit) == FAILURE)
@@ -702,8 +779,14 @@ PHP_FUNCTION(setStr)
             iReturn,
             structGet[0]->parameterValue
         );
+    rc = strcmp_s(structGet[0]->parameterName, strlen(structGet[0]->parameterName), dotstr, &ind);
+    if(rc != EOK)
+    {
+        CosaPhpExtLog("ccsp-webui: Safe String Comparison (strcmp_s) - %s %d rc = %d", __FUNCTION__, __LINE__, rc);
+        RETURN_FALSE;
+    }
 
-    if (size != 1 || strcmp(structGet[0]->parameterName, dotstr) != 0)
+    if (size != 1 || ind != 0)
     {
     #if _DEBUG_
         syslog(LOG_ERR, "%s: miss match", __FUNCTION__);
@@ -809,7 +892,7 @@ PHP_FUNCTION(getInstanceIds)
     parameterInfoStruct_t **        parameter;
     int                             inst_num = 0;
     char                            buf[CCSP_BASE_PARAM_LENGTH];
-    char                            subSystemPrefix[6] = {0};
+    char                            subSystemPrefix[MAX_SUBSYSTEMPREFIX] = {0};
 
     if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &dotstr, &flen) == FAILURE) {
         //RETURN_STRING("ERROR: GetStr: ARGUMENT MISSING",1);
@@ -855,7 +938,12 @@ PHP_FUNCTION(getInstanceIds)
 
     for(loop1=0,loop2=0; loop1<(InstNum); loop1++) 
     {
-        len =sprintf(&format_s[loop2],"%d,", pInstNumList[loop1]);
+        len  = sprintf_s(&format_s[loop2], sizeof(format_s), "%d,", pInstNumList[loop1]);
+        if((len < EOK) || (len == ESNULLP) || (len == ESZEROL) || (len == ESLEMAX) || (len == EOVERFLOW) || (len == ESNOSPC))
+        {
+            CosaPhpExtLog("ccsp-webui: Safe sprintf_s Error - %s %d rc = %d", __FUNCTION__, __LINE__, rc);
+            _RETURN_STRING("");
+        }
         loop2=loop2+len;
     }
 
@@ -900,7 +988,7 @@ PHP_FUNCTION(addTblObj)
     int                             inst_num = 0;
     int                             iReturnInstNum = 0;
     char                            buf[CCSP_BASE_PARAM_LENGTH];
-    char                            subSystemPrefix[6] = {0};
+    char                            subSystemPrefix[MAX_SUBSYSTEMPREFIX] = {0};
 
     if ( zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &dotstr, &flen) == FAILURE )
     {
@@ -981,7 +1069,7 @@ PHP_FUNCTION(delTblObj)
     parameterInfoStruct_t **        parameter;
     int                             inst_num = 0;
     char                            buf[CCSP_BASE_PARAM_LENGTH];
-    char                            subSystemPrefix[6] = {0};
+    char                            subSystemPrefix[MAX_SUBSYSTEMPREFIX] = {0};
 
     if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &dotstr, &flen) == FAILURE)
     {
@@ -1048,7 +1136,7 @@ PHP_FUNCTION(DmExtGetStrsWithRootObj)
 {
     char*                           pRootObjName;
     int                             RootObjNameLen;
-    char                            subSystemPrefix[6]  = {0};
+    char                            subSystemPrefix[MAX_SUBSYSTEMPREFIX]  = {0};
     int                             iReturn             = 0;
     char*                           pDestComponentName  = NULL;
     char*                           pDestPath           = NULL;
@@ -1242,7 +1330,7 @@ PHP_FUNCTION(DmExtSetStrsWithRootObj)
 {
     char*                           pRootObjName;
     int                             RootObjNameLen;
-    char                            subSystemPrefix[6]  = {0};
+    char                            subSystemPrefix[MAX_SUBSYSTEMPREFIX]  = {0};
     int                             iReturn             = 0;
     char*                           pDestComponentName  = NULL;
     char*                           pDestPath           = NULL;
@@ -1263,6 +1351,8 @@ PHP_FUNCTION(DmExtSetStrsWithRootObj)
     char                            BoolStrBuf[16]      = {0};
     int                             iIndex              = 0;
     char*                           pFaultParamName     = NULL;
+    errno_t                         rc                  = -1;
+    int                             ind                 = -1;
 
     /* Parse paremeters */
     if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "sba", &pRootObjName, &RootObjNameLen, &bCommit, &pParamArray) == FAILURE)
@@ -1404,57 +1494,68 @@ PHP_FUNCTION(DmExtSetStrsWithRootObj)
                 {
                     char*           pTemp   = Z_STRVAL_P(zend_hash_get_current_data_ex(pParamValHash, &pParamValPos));
 #endif
+                    if(pTemp == NULL)
+                     {
+                         iReturn = CCSP_FAILURE;
+                         goto  EXIT0;
+                     }
 
-                    if ( !strcmp(pTemp, "void") )
+		    if ( !(rc = strcmp_s("void", sizeof("void"), pTemp, &ind)) && !(ind) )
                     {
                         CosaPhpExtLog("  Parameter %s type is void!\n", pParameterValList[iIndex].parameterName);
                         pParameterValList[iIndex].type = ccsp_none;
-                    }
-                    else if ( !strcmp(pTemp, "string") )
+		    }
+		    else if ( !(rc = strcmp_s("string", sizeof("string"), pTemp, &ind)) && !(ind) )
                     {
                         pParameterValList[iIndex].type = ccsp_string;
                     }
-                    else if ( !strcmp(pTemp, "int") )
+		    else if ( !(rc = strcmp_s("int", sizeof("int"), pTemp, &ind)) && !(ind) )
                     {
                         pParameterValList[iIndex].type = ccsp_int;
                     }
-                    else if ( !strcmp(pTemp, "uint") )
+		    else if ( !(rc = strcmp_s("uint", sizeof("uint"), pTemp, &ind)) && !(ind) )
                     {
                         pParameterValList[iIndex].type = ccsp_unsignedInt;
                     }
-                    else if ( !strcmp(pTemp, "bool") )
+		    else if ( !(rc = strcmp_s("bool", sizeof("bool"), pTemp, &ind)) && !(ind) )
                     {
                         pParameterValList[iIndex].type = ccsp_boolean;
                     }
-                    else if ( !strcmp(pTemp, "datetime") )
+		    else if ( !(rc = strcmp_s("datetime", sizeof("datetime"), pTemp, &ind)) && !(ind) )
                     {
                         pParameterValList[iIndex].type = ccsp_dateTime;
                     }
-                    else if ( !strcmp(pTemp, "base64") )
+		    else if ( !(rc = strcmp_s("base64", sizeof("base64"), pTemp, &ind)) && !(ind) )
                     {
                         pParameterValList[iIndex].type = ccsp_base64;
                     }
-                    else if ( !strcmp(pTemp, "long") )
+		    else if ( !(rc = strcmp_s("long", sizeof("long"), pTemp, &ind)) && !(ind) )
                     {
                         pParameterValList[iIndex].type = ccsp_long;
                     }
-                    else if ( !strcmp(pTemp, "unlong") )
+		    else if ( !(rc = strcmp_s("unlong", sizeof("unlong"), pTemp, &ind)) && !(ind) )
                     {
                         pParameterValList[iIndex].type = ccsp_unsignedLong;
                     }
-                    else if ( !strcmp(pTemp, "float") )
+		    else if ( !(rc = strcmp_s("float", sizeof("float"), pTemp, &ind)) && !(ind) )
                     {
                         pParameterValList[iIndex].type = ccsp_float;
                     }
-                    else if ( !strcmp(pTemp, "double") )
+		    else if ( !(rc = strcmp_s("double", sizeof("double"), pTemp, &ind)) && !(ind) )
                     {
                         pParameterValList[iIndex].type = ccsp_double;
                     }
-                    else if ( !strcmp(pTemp, "byte") )
+		    else if ( !(rc = strcmp_s("byte", sizeof("byte"), pTemp, &ind)) && !(ind) )
                     {
                         pParameterValList[iIndex].type = ccsp_byte;
                     }
-
+		    else if (rc != EOK)
+                    {
+                        CosaPhpExtLog("ccsp-webui: Safe String Comparison error- %s %d rc = %d", __FUNCTION__, __LINE__, rc);
+                        iReturn = CCSP_FAILURE;
+                        goto  EXIT0;
+                    }
+ 
                     CosaPhpExtLog("  Param type %d->%s\n", pParameterValList[iIndex].type, pTemp);
                 }
 
@@ -1473,15 +1574,37 @@ PHP_FUNCTION(DmExtSetStrsWithRootObj)
                     if ( pParameterValList[iIndex].type == ccsp_boolean )
                     {
                         /* support true/false or 1/0 for boolean value */
-                        if ( !strcmp(pParameterValList[iIndex].parameterValue, "1") )
+                        if(pParameterValList[iIndex].parameterValue == NULL)
                         {
-                            strcpy(BoolStrBuf, "true");
+                            iReturn = CCSP_FAILURE;
+                            goto  EXIT0;
+                        }
+
+			if ( !(rc = strcmp_s("1", sizeof("1"), pParameterValList[iIndex].parameterValue, &ind)) && !(ind) )
+                        {
+			    rc = strcpy_s(BoolStrBuf, sizeof(BoolStrBuf), "true");
+                            if(rc != EOK)
+                            {
+                                CosaPhpExtLog("ccsp-webui: Safe String Copy error- %s %d rc = %d", __FUNCTION__, __LINE__, rc);
+                                iReturn = CCSP_FAILURE;
+                                goto  EXIT0;
+                            }
                             pParameterValList[iIndex].parameterValue = BoolStrBuf;
                         }
-                        else if ( !strcmp(pParameterValList[iIndex].parameterValue, "0"))
+			else if ( !(rc = strcmp_s("0", sizeof("0"), pParameterValList[iIndex].parameterValue, &ind)) && !(ind) )
                         {
-                            strcpy(BoolStrBuf, "false");
+			    rc = strcpy_s(BoolStrBuf, sizeof(BoolStrBuf), "false");
+                            if(rc != EOK)
+                            {
+                                CosaPhpExtLog("ccsp-webui: Safe String Copy error- %s %d rc = %d", __FUNCTION__, __LINE__, rc);
+                                iReturn = CCSP_FAILURE;
+                                goto  EXIT0;
+                            }
                             pParameterValList[iIndex].parameterValue = BoolStrBuf;
+                        }
+			else if(rc != EOK)
+                        {
+                            CosaPhpExtLog("ccsp-webui: Safe String Comparison error- %s %d rc = %d", __FUNCTION__, __LINE__, rc);
                         }
                     }
                     CosaPhpExtLog("  Param Value %s\n", pParameterValList[iIndex].parameterValue);
@@ -1561,13 +1684,14 @@ PHP_FUNCTION(DmExtGetInstanceIds)
 {
     int                             flen;
     char*                           dotstr              = NULL;
-    char                            subSystemPrefix[6]  = {0};
+    char                            subSystemPrefix[MAX_SUBSYSTEMPREFIX]  = {0};
     char*                           ppDestComponentName = NULL;
     char*                           ppDestPath          = NULL ;
     int                             iReturn             = 0;
     unsigned int                    InstNum             = 0;
     unsigned int*                   pInstNumList        = NULL;
     int                             iIndex              = 0;
+    errno_t                         rc                  = -1;
 
     if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "s", &dotstr, &flen) == FAILURE)
     {
@@ -1630,7 +1754,13 @@ PHP_FUNCTION(DmExtGetInstanceIds)
 
         for ( iIndex = 0; iIndex < InstNum; iIndex++ )
         {
-            snprintf(StrBuf, sizeof(StrBuf) - 1, "%d", pInstNumList[iIndex]);
+            rc = snprintf_s(StrBuf, sizeof(StrBuf)-1, "%d", pInstNumList[iIndex]);
+            if(rc != EOK)
+            {
+                CosaPhpExtLog("ccsp-webui: Safe snprintf_s Error - %s %d rc = %d", __FUNCTION__, __LINE__, rc);
+                iReturn = CCSP_FAILURE;
+                goto  EXIT0;
+            }
             _add_next_index_string(return_value, StrBuf);
             CosaPhpExtLog("Instance %d: %s\n", iIndex, StrBuf);
         }
